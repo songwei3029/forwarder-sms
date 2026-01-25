@@ -40,11 +40,12 @@ export function validateBody(body) {
         return { valid: false, error: 'Invalid request body' };
     }
 
-    if (!body.content || typeof body.content !== 'string') {
+    const content = String(body.content || '').trim();
+    if (!content) {
         return { valid: false, error: 'Missing or invalid content field' };
     }
 
-    if (body.content.length > 1000) {
+    if (content.length > 1000) {
         return { valid: false, error: 'Content too long' };
     }
 
