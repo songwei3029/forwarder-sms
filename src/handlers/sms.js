@@ -2,7 +2,7 @@
  * SMS 转发处理器
  */
 
-import { validateToken, validateBody, validateTimestamp, extractCode, isVerificationSms } from '../utils/validator.js';
+import { validateTimestamp, extractCode, isVerificationSms } from '../utils/validator.js';
 import { sendBarkNotification, buildNotificationContent } from '../utils/bark.js';
 import { checkRateLimit } from '../utils/rateLimit.js';
 
@@ -12,10 +12,12 @@ import { checkRateLimit } from '../utils/rateLimit.js';
 export async function handleSmsForward(request, env, url) {
     const isDebug = url.searchParams.get('debug') === 'true' || env.DEBUG === 'true';
 
-    // 1. Token 鉴权
-    const tokenResult = validateToken(request, env);
-    if (!tokenResult.valid) {
-        console.log('Auth failed:', tokenResult.error);
+    // 1. Token 鉴权（不易踩坑版）
+    const auth = (request.headers.get('Authorization') || '').trim();
+    const expected = `Bearer ${env.API_TOKEN}`;
+
+    if (auth !== expected) {
+        console.log('Auth failed');
         return jsonResponse({ success: false, message: 'Unauthorized' }, 401);
     }
 
@@ -27,39 +29,45 @@ export async function handleSmsForward(request, env, url) {
         return jsonResponse({ success: false, message: 'Invalid JSON' }, 400);
     }
 
+    // 🔑 无条件转字符串（兼容 iOS / Webhook / curl）
+    const content = String(body?.content ?? '').trim();
+
+    // 🔑 再判断是否为空
+    if (!content) {
+        return jsonResponse({ success: false, message: 'Missing or invalid content field' }, 400);
+    }
+
+    if (content.length > 1000) {
+        return jsonResponse({ success: false, message: 'Content too long' }, 400);
+    }
+
     console.log('Received SMS forward request:', {
         device: body.device,
-        contentLength: body.content?.length,
+        contentLength: content.length,
         hasCode: !!body.code,
     });
 
-    // 3. 请求体校验
-    const bodyResult = validateBody(body);
-    if (!bodyResult.valid) {
-        return jsonResponse({ success: false, message: bodyResult.error }, 400);
-    }
-
-    // 4. 时间戳校验
+    // 3. 时间戳校验
     const timestampResult = validateTimestamp(body.timestamp);
     if (!timestampResult.valid) {
         return jsonResponse({ success: false, message: timestampResult.error }, 400);
     }
 
-    // 5. 速率限制
+    // 4. 速率限制
     const device = body.device || 'unknown';
     const rateResult = await checkRateLimit(env, device);
     if (!rateResult.allowed) {
         return jsonResponse({ success: false, message: rateResult.error }, 429);
     }
 
-    // 6. 提取验证码
+    // 5. 提取验证码
     let code = body.code;
     if (!code) {
-        code = extractCode(body.content);
+        code = extractCode(content);
     }
 
-    // 7. 非验证码短信过滤（可选）
-    if (!code && !isVerificationSms(body.content)) {
+    // 6. 非验证码短信过滤（可选）
+    if (!code && !isVerificationSms(content)) {
         console.log('Skipped: not a verification SMS');
         return jsonResponse({
             success: true,
@@ -68,7 +76,7 @@ export async function handleSmsForward(request, env, url) {
         });
     }
 
-    // 8. KV 去重检查
+    // 7. KV 去重检查
     if (code) {
         const dedupeKey = `sms:${code}`;
         const existing = await env.SMS_CACHE.get(dedupeKey);
@@ -87,11 +95,11 @@ export async function handleSmsForward(request, env, url) {
         await env.SMS_CACHE.put(dedupeKey, JSON.stringify({
             device,
             timestamp: Date.now(),
-            content: body.content.slice(0, 100), // 只存储前100字符
+            content: content.slice(0, 100), // 只存储前100字符
         }), { expirationTtl: 300 });
     }
 
-    // 9. Debug 模式：只写 KV，不推送
+    // 8. Debug 模式：只写 KV，不推送
     if (isDebug) {
         console.log('Debug mode: skipping Bark push');
         return jsonResponse({
@@ -102,8 +110,8 @@ export async function handleSmsForward(request, env, url) {
         });
     }
 
-    // 10. 发送 Bark 推送
-    const { title, body: notifyBody } = buildNotificationContent(code, body.content, device);
+    // 9. 发送 Bark 推送
+    const { title, body: notifyBody } = buildNotificationContent(code, content, device);
 
     // 支持指定推送目标
     const targetKeys = body.target && Array.isArray(body.target) ? body.target : null;
